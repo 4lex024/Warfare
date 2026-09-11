@@ -44,13 +44,18 @@ local Tab = Window:CreateTab("Tab Example", 4483362458) -- Title, Image
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
+local Camera = Workspace.CurrentCamera
 
--- Konfigurasi Aimbot
+-- Konfigurasi State
 local AimbotEnabled = false
+local ESPEnabled = false
 local FOV_Radius = 100 
+
+local ESPFolder = Instance.new("Folder", Workspace)
+ESPFolder.Name = "ESP_Highlights"
 
 -- Membuat FOV Circle
 local FOVCircle = Drawing.new("Circle")
@@ -60,19 +65,46 @@ FOVCircle.Radius = FOV_Radius
 FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
--- Fungsi WallCheck (Raycast) untuk mendeteksi dinding
+-- Fungsi menentukan warna berdasarkan string nama Team
+local function getTeamColor(teamName)
+    if not teamName then return Color3.fromRGB(255, 255, 255) end
+    
+    local lowerName = string.lower(tostring(teamName))
+    if string.find(lowerName, "red") or string.find(lowerName, "merah") then
+        return Color3.fromRGB(255, 50, 50)
+    elseif string.find(lowerName, "blue") or string.find(lowerName, "biru") then
+        return Color3.fromRGB(0, 150, 255)
+    elseif string.find(lowerName, "green") or string.find(lowerName, "hijau") then
+        return Color3.fromRGB(50, 255, 50)
+    elseif string.find(lowerName, "yellow") or string.find(lowerName, "kuning") then
+        return Color3.fromRGB(255, 255, 50)
+    end
+    
+    return Color3.fromRGB(200, 200, 200)
+end
+
+-- Fungsi Cek Teman
+local function isTeammate(targetPlayer)
+    local myTeam = LocalPlayer:GetAttribute("Team") or (pcall(function() return LocalPlayer.Team end) and LocalPlayer.Team)
+    local targetTeam = targetPlayer:GetAttribute("Team") or (pcall(function() return targetPlayer.Team end) and targetPlayer.Team)
+
+    if myTeam and targetTeam and myTeam == targetTeam then
+        return true
+    end
+    return false
+end
+
+-- Fungsi WallCheck (Raycast)
 local function isVisible(targetPart)
     local origin = Camera.CFrame.Position
     local direction = targetPart.Position - origin
     
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-    -- Abaikan karakter sendiri agar ray tidak terkena tubuh sendiri
     raycastParams.FilterDescendantsInstances = {LocalPlayer.Character} 
     
-    local raycastResult = workspace:Raycast(origin, direction, raycastParams)
+    local raycastResult = Workspace:Raycast(origin, direction, raycastParams)
     
-    -- Jika ray mengenai sesuatu, pastikan itu adalah target yang dituju
     if raycastResult then
         if raycastResult.Instance:IsDescendantOf(targetPart.Parent) then
             return true
@@ -82,65 +114,123 @@ local function isVisible(targetPart)
     return true
 end
 
--- UI Toggle
-local Toggle = Tab:CreateToggle({
-   Name = "Enable Aimbot",
-   CurrentValue = false,
-   Flag = "AimbotToggle",
-   Callback = function(Value)
-       AimbotEnabled = Value
-       FOVCircle.Visible = Value
-   end,
+-- Update Highlight ESP
+local function applyESP(model, fillColor)
+    if not model then return end
+    
+    local highlight = ESPFolder:FindFirstChild(model.Name .. "_ESP")
+    if not highlight then
+        highlight = Instance.new("Highlight")
+        highlight.Name = model.Name .. "_ESP"
+        highlight.Parent = ESPFolder
+    end
+    
+    highlight.Adornee = model
+    highlight.FillColor = fillColor
+    highlight.FillTransparency = 0.5
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.OutlineTransparency = 1
+    highlight.Enabled = ESPEnabled
+end
+
+-- 1. TOGGLE AIMBOT
+local AimbotToggle = Tab:CreateToggle({
+    Name = "Enable Aimbot",
+    CurrentValue = false,
+    Flag = "AimbotToggle",
+    Callback = function(Value)
+        AimbotEnabled = Value
+        FOVCircle.Visible = Value
+    end,
+})
+
+-- 2. TOGGLE ESP (DIPISAH)
+local ESPToggle = Tab:CreateToggle({
+    Name = "Enable Team ESP",
+    CurrentValue = false,
+    Flag = "ESPToggle",
+    Callback = function(Value)
+        ESPEnabled = Value
+        if not Value then
+            ESPFolder:ClearAllChildren()
+        end
+    end,
 })
 
 -- UI Slider FOV
 local Slider = Tab:CreateSlider({
-   Name = "FOV Size",
-   Range = {50, 500},
-   Increment = 10,
-   Suffix = " Pixels",
-   CurrentValue = 100,
-   Flag = "FOVSize",
-   Callback = function(Value)
-       FOV_Radius = Value
-       FOVCircle.Radius = Value
-   end,
+    Name = "FOV Size",
+    Range = {50, 500},
+    Increment = 10,
+    Suffix = " Pixels",
+    CurrentValue = 100,
+    Flag = "FOVSize",
+    Callback = function(Value)
+        FOV_Radius = Value
+        FOVCircle.Radius = Value
+    end,
 })
 
 -- Loop Utama
 RunService.RenderStepped:Connect(function()
-    -- Update posisi lingkaran ke tengah layar
     FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
-    if AimbotEnabled and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
-        local closestPlayer = nil
-        local shortestDistance = FOV_Radius -- Batasi jarak pencarian dengan FOV_Radius
+    local closestTarget = nil
+    local shortestDistance = FOV_Radius
+    local centerScreen = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
+    -- LOGIKA ESP (Jalan jika ESPEnabled true)
+    if ESPEnabled then
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("Humanoid") and player.Character.Humanoid.Health > 0 then
+                local playerTeam = player:GetAttribute("Team") or (pcall(function() return player.Team end) and player.Team)
+                local teamColor = getTeamColor(playerTeam)
+                applyESP(player.Character, teamColor)
+            elseif player.Character and ESPFolder:FindFirstChild(player.Character.Name .. "_ESP") then
+                ESPFolder[player.Character.Name .. "_ESP"]:Destroy()
+            end
+        end
+
+        local teacher = Workspace:FindFirstChild("Teacher")
+        if teacher and teacher:FindFirstChild("Head") then
+            applyESP(teacher, Color3.fromRGB(180, 0, 255))
+        end
+    end
+
+    -- LOGIKA AIMBOT (Jalan jika AimbotEnabled true & Klik Kanan ditekan)
+    if AimbotEnabled and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        -- Scan Players
         for _, player in pairs(Players:GetPlayers()) do
             if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("Head") and player.Character:FindFirstChild("Humanoid") then
-                
-                -- Logika Filter Tim: Jika TeamTag.Enabled == true, maka itu teman
-                local teamTag = player.Character:FindFirstChild("TeamTag")
-                local isTeammate = (teamTag and teamTag:IsA("BillboardGui") and teamTag.Enabled == true)
-                
-                if not isTeammate and player.Character.Humanoid.Health > 0 then
+                if not isTeammate(player) and player.Character.Humanoid.Health > 0 then
                     local headPos, onScreen = Camera:WorldToViewportPoint(player.Character.Head.Position)
-                    
                     if onScreen then
-                        local distance = (Vector2.new(headPos.X, headPos.Y) - Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)).Magnitude
-                        
-                        -- Cek apakah di dalam FOV, terlihat (WallCheck), dan paling dekat
+                        local distance = (Vector2.new(headPos.X, headPos.Y) - centerScreen).Magnitude
                         if distance < shortestDistance and isVisible(player.Character.Head) then
                             shortestDistance = distance
-                            closestPlayer = player.Character.Head
+                            closestTarget = player.Character.Head
                         end
                     end
                 end
             end
         end
 
-        if closestPlayer then
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closestPlayer.Position)
+        -- Scan Teacher
+        local teacher = Workspace:FindFirstChild("Teacher")
+        if teacher and teacher:FindFirstChild("Head") then
+            local headPos, onScreen = Camera:WorldToViewportPoint(teacher.Head.Position)
+            if onScreen then
+                local distance = (Vector2.new(headPos.X, headPos.Y) - centerScreen).Magnitude
+                if distance < shortestDistance and isVisible(teacher.Head) then
+                    shortestDistance = distance
+                    closestTarget = teacher.Head
+                end
+            end
+        end
+
+        -- Lock Camera
+        if closestTarget then
+            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closestTarget.Position)
         end
     end
 end)
